@@ -1,0 +1,25 @@
+# PlatformIO
+.pio/
+.piolibdeps/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+XIAO_LoRa.code-workspace
+
+include/secrets.h
+include/secrets.h.bak.*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# clangd
+.cache/
+compile_commands.json
+
+# user
+to-do
