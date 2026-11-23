@@ -6,8 +6,12 @@
 #include <string.h>
 #include "secrets.h"
 
-// Minimum interval between temperature uplinks; airtime rules can extend it.
-constexpr uint32_t uplinkIntervalSeconds = 10UL * 60UL;
+// Default interval and accepted range for remotely configured uplinks.
+constexpr uint32_t defaultUplinkIntervalMinutes = 10UL;
+constexpr uint32_t minUplinkIntervalMinutes = 1UL;
+constexpr uint32_t maxUplinkIntervalMinutes = 1440UL;
+constexpr uint8_t commandFPort = 2;
+constexpr uint8_t commandSetInterval = 0x01;
 
 constexpr size_t lorawanKeySize = 16;
 uint8_t appKey[lorawanKeySize];

@@ -5,7 +5,76 @@
 #include <esp_sleep.h>
 #include "config.h"
 
+void haltDevice(const char* message);
+
 Preferences store;
+uint32_t uplinkIntervalMinutes = defaultUplinkIntervalMinutes;
+
+uint32_t uplinkIntervalSeconds() {
+  return uplinkIntervalMinutes * 60UL;
+}
+
+void loadUplinkInterval() {
+  uint32_t savedSeconds = store.getUInt(
+    "interval_s",
+    defaultUplinkIntervalMinutes * 60UL
+  );
+
+  if (savedSeconds < minUplinkIntervalMinutes * 60UL ||
+      savedSeconds > maxUplinkIntervalMinutes * 60UL ||
+      savedSeconds % 60UL != 0) {
+    Serial.println("Stored uplink interval is invalid; using default 10 minutes.");
+    uplinkIntervalMinutes = defaultUplinkIntervalMinutes;
+    return;
+  }
+
+  uplinkIntervalMinutes = savedSeconds / 60UL;
+}
+
+void saveUplinkInterval(uint32_t minutes) {
+  uint32_t seconds = minutes * 60UL;
+  size_t written = store.putUInt("interval_s", seconds);
+
+  if (written != sizeof(uint32_t)) {
+    haltDevice("ERROR: Could not save uplink interval to flash.");
+  }
+
+  uplinkIntervalMinutes = minutes;
+  Serial.printf("New uplink interval saved: %lu minutes.\n",
+                (unsigned long)uplinkIntervalMinutes);
+}
+
+void processDownlink(const uint8_t* payload, size_t length,
+                     const LoRaWANEvent_t& event) {
+  if (event.fPort != commandFPort) {
+    Serial.printf("Downlink ignored: unexpected FPort %u.\n", event.fPort);
+    return;
+  }
+
+  if (length != 3) {
+    Serial.printf("Downlink ignored: expected 3 bytes, received %u.\n",
+                  (unsigned int)length);
+    return;
+  }
+
+  if (payload[0] != commandSetInterval) {
+    Serial.printf("Downlink ignored: unknown command 0x%02X.\n", payload[0]);
+    return;
+  }
+
+  uint32_t minutes = ((uint32_t)payload[1] << 8) | payload[2];
+
+  if (minutes < minUplinkIntervalMinutes ||
+      minutes > maxUplinkIntervalMinutes) {
+    Serial.printf("Downlink ignored: interval %lu minutes is outside 1..1440.\n",
+                  (unsigned long)minutes);
+    return;
+  }
+
+  Serial.printf("Interval command received: %lu minutes.\n",
+                (unsigned long)minutes);
+  saveUplinkInterval(minutes);
+}
 
 void haltDevice(const char* message) {
   Serial.println(message);
@@ -28,6 +97,8 @@ void lowPowerWait(uint32_t waitMs) {
     return;
   }
 
+  Serial.printf("\nPreparing light sleep for %lu ms...\n",
+                (unsigned long)waitMs);
   Serial.flush();
 
   int16_t state = radio.sleep(true);
@@ -39,22 +110,33 @@ void lowPowerWait(uint32_t waitMs) {
   esp_err_t stateResult = esp_sleep_enable_timer_wakeup(
     (uint64_t)waitMs * 1000ULL
   );
+
   if (stateResult != ESP_OK) {
     Serial.printf("Sleep timer setup failed: %d\n", stateResult);
-    haltDevice("Cannot set the low-power wake timer.");
+    haltDevice("Cannot set the low-power wait timer.");
   }
 
+  Serial.println("Entering light sleep now.");
+  Serial.flush();
+
   stateResult = esp_light_sleep_start();
+
   if (stateResult != ESP_OK) {
     Serial.printf("Light sleep failed: %d\n", stateResult);
     haltDevice("Cannot enter low-power mode.");
   }
+
+  Serial.println("\nLight sleep finished.");
+  Serial.printf("Wake-up cause: %d\n", (int)esp_sleep_get_wakeup_cause());
 
   state = radio.standby();
   if (state != RADIOLIB_ERR_NONE) {
     printResult("Radio wake failed", state);
     haltDevice("Cannot wake the LoRa radio from sleep.");
   }
+
+  Serial.println("Radio ready again.");
+  Serial.flush();
 }
 
 void saveNonces() {
@@ -230,6 +312,10 @@ void setup() {
     haltDevice("ERROR: Could not open ESP32 persistent storage.");
   }
 
+  loadUplinkInterval();
+  Serial.printf("Configured uplink interval: %lu minutes.\n",
+                (unsigned long)uplinkIntervalMinutes);
+
   // Configure uplinks and join attempts before starting OTAA.
   node.setADR(true);
   node.setDutyCycle(true, 1250);
@@ -255,35 +341,48 @@ void loop() {
       temperature < -327.68f ||
       temperature > 327.67f) {
     Serial.println("Invalid temperature: skipping this reading.");
-    lowPowerWait(uplinkIntervalSeconds * 1000UL);
+    lowPowerWait(uplinkIntervalSeconds() * 1000UL);
     return;
   }
 
-  // Signed int16, hundredths of a degree C, big-endian.
+  // Uplink payload, big-endian:
+  // bytes 0..1: signed temperature in 0.01 C
+  // bytes 2..3: configured uplink interval in whole minutes
   int16_t temperature100 =
     (int16_t)lroundf(temperature * 100.0f);
+  uint16_t encodedTemperature = (uint16_t)temperature100;
+  uint16_t encodedInterval = (uint16_t)uplinkIntervalMinutes;
 
-  uint16_t encoded = (uint16_t)temperature100;
-
-  uint8_t payload[2] = {
-    (uint8_t)(encoded >> 8),
-    (uint8_t)(encoded & 0xFF)
+  uint8_t payload[4] = {
+    (uint8_t)(encodedTemperature >> 8),
+    (uint8_t)(encodedTemperature & 0xFF),
+    (uint8_t)(encodedInterval >> 8),
+    (uint8_t)(encodedInterval & 0xFF)
   };
 
   Serial.printf("\nSending chip temperature: %.2f C\n",
                 temperature);
+  Serial.printf("Configured interval: %lu minutes\n",
+                (unsigned long)uplinkIntervalMinutes);
+  Serial.printf("Payload: %02X %02X %02X %02X, FPort: 1\n",
+                payload[0], payload[1], payload[2], payload[3]);
 
-  Serial.printf("Payload: %02X %02X, FPort: 1\n",
-                payload[0], payload[1]);
-
+  uint8_t downlinkPayload[16] = { 0 };
+  size_t downlinkLength = sizeof(downlinkPayload);
+  LoRaWANEvent_t downlinkEvent = {};
   uint32_t frameCountBefore = node.getFCntUp();
 
   // Unconfirmed uplink, followed by both receive windows.
+  // The overload with a downlink buffer exposes application commands.
   int16_t state = node.sendReceive(
     payload,
     sizeof(payload),
     1,
-    false
+    downlinkPayload,
+    &downlinkLength,
+    false,
+    nullptr,
+    &downlinkEvent
   );
 
   // Persist nonce state after the exchange as well.
@@ -291,12 +390,19 @@ void loop() {
   // the device performs a fresh OTAA join instead.
   saveNonces();
 
-  if (state == RADIOLIB_LORAWAN_NO_DOWNLINK) {
-    Serial.println(
-      "Uplink transmitted; no downlink received (normal)."
-    );
-  } else if (state == RADIOLIB_ERR_NONE) {
-    Serial.println("Uplink exchange completed with a downlink.");
+  if (state > 0) {
+    Serial.printf("Downlink received in RX%u, FPort %u, %u bytes.\n",
+                  (unsigned int)state,
+                  downlinkEvent.fPort,
+                  (unsigned int)downlinkLength);
+
+    if (downlinkLength > 0) {
+      processDownlink(downlinkPayload, downlinkLength, downlinkEvent);
+    } else {
+      Serial.println("Downlink contained no application payload.");
+    }
+  } else if (state == 0) {
+    Serial.println("Uplink transmitted; no downlink received (normal).");
   } else {
     printResult("Uplink exchange returned an error", state);
   }
@@ -307,7 +413,7 @@ void loop() {
     );
   }
 
-  Serial.printf("Next attempt in %lu seconds, subject to airtime limits.\n",
-                (unsigned long)uplinkIntervalSeconds);
-  lowPowerWait(uplinkIntervalSeconds * 1000UL);
+  Serial.printf("Next attempt in %lu minutes, subject to airtime limits.\n",
+                (unsigned long)uplinkIntervalMinutes);
+  lowPowerWait(uplinkIntervalSeconds() * 1000UL);
 }
