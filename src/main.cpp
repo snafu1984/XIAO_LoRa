@@ -1,8 +1,8 @@
+
 #include <Arduino.h>
 #include <SPI.h>
 #include <Preferences.h>
 #include <math.h>
-#include <esp_sleep.h>
 #include "config.h"
 
 void haltDevice(const char* message);
@@ -23,7 +23,7 @@ void loadUplinkInterval() {
   if (savedSeconds < minUplinkIntervalMinutes * 60UL ||
       savedSeconds > maxUplinkIntervalMinutes * 60UL ||
       savedSeconds % 60UL != 0) {
-    Serial.println("Stored uplink interval is invalid; using default 10 minutes.");
+    Serial.println("Stored uplink interval is invalid; using default.");
     uplinkIntervalMinutes = defaultUplinkIntervalMinutes;
     return;
   }
@@ -33,6 +33,7 @@ void loadUplinkInterval() {
 
 void saveUplinkInterval(uint32_t minutes) {
   uint32_t seconds = minutes * 60UL;
+
   size_t written = store.putUInt("interval_s", seconds);
 
   if (written != sizeof(uint32_t)) {
@@ -40,45 +41,67 @@ void saveUplinkInterval(uint32_t minutes) {
   }
 
   uplinkIntervalMinutes = minutes;
-  Serial.printf("New uplink interval saved: %lu minutes.\n",
-                (unsigned long)uplinkIntervalMinutes);
+
+  Serial.printf(
+    "New uplink interval saved: %lu minutes.\n",
+    (unsigned long)uplinkIntervalMinutes
+  );
 }
 
-void processDownlink(const uint8_t* payload, size_t length,
-                     const LoRaWANEvent_t& event) {
+void processDownlink(
+  const uint8_t* payload,
+  size_t length,
+  const LoRaWANEvent_t& event
+) {
   if (event.fPort != commandFPort) {
-    Serial.printf("Downlink ignored: unexpected FPort %u.\n", event.fPort);
+    Serial.printf(
+      "Downlink ignored: unexpected FPort %u.\n",
+      event.fPort
+    );
     return;
   }
 
   if (length != 3) {
-    Serial.printf("Downlink ignored: expected 3 bytes, received %u.\n",
-                  (unsigned int)length);
+    Serial.printf(
+      "Downlink ignored: expected 3 bytes, received %u.\n",
+      (unsigned int)length
+    );
     return;
   }
 
   if (payload[0] != commandSetInterval) {
-    Serial.printf("Downlink ignored: unknown command 0x%02X.\n", payload[0]);
+    Serial.printf(
+      "Downlink ignored: unknown command 0x%02X.\n",
+      payload[0]
+    );
     return;
   }
 
-  uint32_t minutes = ((uint32_t)payload[1] << 8) | payload[2];
+  uint32_t minutes =
+    ((uint32_t)payload[1] << 8) | payload[2];
 
   if (minutes < minUplinkIntervalMinutes ||
       minutes > maxUplinkIntervalMinutes) {
-    Serial.printf("Downlink ignored: interval %lu minutes is outside 1..1440.\n",
-                  (unsigned long)minutes);
+    Serial.printf(
+      "Downlink ignored: interval %lu minutes is outside allowed range.\n",
+      (unsigned long)minutes
+    );
     return;
   }
 
-  Serial.printf("Interval command received: %lu minutes.\n",
-                (unsigned long)minutes);
+  Serial.printf(
+    "Interval command received: %lu minutes.\n",
+    (unsigned long)minutes
+  );
+
   saveUplinkInterval(minutes);
 }
 
 void haltDevice(const char* message) {
   Serial.println(message);
-  Serial.println("Stopped to avoid unsafe or repeated transmissions.");
+  Serial.println(
+    "Stopped to avoid unsafe or repeated transmissions."
+  );
 
   while (true) {
     delay(1000);
@@ -86,56 +109,31 @@ void haltDevice(const char* message) {
 }
 
 void printResult(const char* message, int16_t state) {
-  Serial.printf("%s: %s (%d)\n",
-                message,
-                stateDecode(state).c_str(),
-                state);
+  Serial.printf(
+    "%s: %s (%d)\n",
+    message,
+    stateDecode(state).c_str(),
+    state
+  );
 }
 
-void lowPowerWait(uint32_t waitMs) {
+// Diagnostic wait without ESP32 Light Sleep.
+// USB CDC remains active during the waiting period.
+void waitWithoutSleep(uint32_t waitMs) {
   if (waitMs == 0) {
     return;
   }
 
-  Serial.printf("\nPreparing light sleep for %lu ms...\n",
-                (unsigned long)waitMs);
-  Serial.flush();
-
-  int16_t state = radio.sleep(true);
-  if (state != RADIOLIB_ERR_NONE) {
-    printResult("Radio sleep failed", state);
-    haltDevice("Cannot safely enter low-power wait.");
-  }
-
-  esp_err_t stateResult = esp_sleep_enable_timer_wakeup(
-    (uint64_t)waitMs * 1000ULL
+  Serial.printf(
+    "\nWaiting without Light Sleep for %lu ms...\n",
+    (unsigned long)waitMs
   );
 
-  if (stateResult != ESP_OK) {
-    Serial.printf("Sleep timer setup failed: %d\n", stateResult);
-    haltDevice("Cannot set the low-power wait timer.");
-  }
-
-  Serial.println("Entering light sleep now.");
   Serial.flush();
 
-  stateResult = esp_light_sleep_start();
+  delay(waitMs);
 
-  if (stateResult != ESP_OK) {
-    Serial.printf("Light sleep failed: %d\n", stateResult);
-    haltDevice("Cannot enter low-power mode.");
-  }
-
-  Serial.println("\nLight sleep finished.");
-  Serial.printf("Wake-up cause: %d\n", (int)esp_sleep_get_wakeup_cause());
-
-  state = radio.standby();
-  if (state != RADIOLIB_ERR_NONE) {
-    printResult("Radio wake failed", state);
-    haltDevice("Cannot wake the LoRa radio from sleep.");
-  }
-
-  Serial.println("Radio ready again.");
+  Serial.println("Wait finished.");
   Serial.flush();
 }
 
@@ -163,10 +161,12 @@ void restoreNonces() {
     return;
   }
 
-  // Nonce counters belong to one device identity. After registering a new
-  // device in TTN, start from a clean state instead of reusing the old counters.
+  // Nonce counters belong to one device identity.
   if (store.getULong64("deveui", 0) != devEUI) {
-    Serial.println("Saved nonces belong to another device identity: discarding.");
+    Serial.println(
+      "Saved nonces belong to another device identity: discarding."
+    );
+
     store.remove("nonces");
     return;
   }
@@ -199,7 +199,7 @@ void restoreNonces() {
 
     haltDevice(
       "Saved nonces are invalid or do not match this configuration. "
-      "Check the device credentials and RadioLib version. "
+      "Check device credentials and RadioLib version. "
       "Do not disable TTN nonce checks."
     );
   }
@@ -211,17 +211,15 @@ void joinNetwork() {
   if (!decodeLoRaWANKey(appKeyHex, appKey) ||
       !decodeLoRaWANKey(nwkKeyHex, nwkKey)) {
     haltDevice(
-      "ERROR: AppKey and NwkKey must each be exactly 32 hexadecimal characters."
+      "ERROR: AppKey and NwkKey must each be exactly "
+      "32 hexadecimal characters."
     );
   }
 
-  // Call once, before restoring the stored nonce buffer.
   node.beginOTAA(joinEUI, devEUI, nwkKey, appKey);
 
   restoreNonces();
 
-  // Bound retries so an unavailable gateway cannot cause
-  // endless join traffic.
   const uint8_t maxAttempts = 6;
 
   for (uint8_t attempt = 0; attempt < maxAttempts; attempt++) {
@@ -233,8 +231,6 @@ void joinNetwork() {
 
     int16_t state = node.activateOTAA();
 
-    // Save after every attempt, including when the join request
-    // was transmitted but no join-accept was received.
     saveNonces();
 
     printResult("Join result", state);
@@ -243,13 +239,16 @@ void joinNetwork() {
         state == RADIOLIB_LORAWAN_SESSION_RESTORED ||
         (state == RADIOLIB_ERR_NONE && node.isActivated())) {
       Serial.println("Joined TTN!");
-      Serial.printf("DevAddr: %08lX\n",
-                    (unsigned long)node.getDevAddr());
+
+      Serial.printf(
+        "DevAddr: %08lX\n",
+        (unsigned long)node.getDevAddr()
+      );
+
       return;
     }
 
     if (attempt + 1 < maxAttempts) {
-      // Backoff: 5, 10, 20, 40, then 60 minutes.
       uint32_t retrySeconds = 300UL << attempt;
 
       if (retrySeconds > 3600UL) {
@@ -278,8 +277,7 @@ void joinNetwork() {
 void setup() {
   Serial.begin(115200);
 
-  // Allow USB serial to connect, but do not require a computer
-  // to be attached for the sensor to run.
+  // Allow USB serial to connect, but do not require a computer.
   unsigned long started = millis();
 
   while (!Serial && millis() - started < 10000UL) {
@@ -288,7 +286,6 @@ void setup() {
 
   Serial.println("\nXIAO chip-temperature LoRaWAN sensor");
 
-  // Initialize the dedicated SPI bus for the XIAO/Wio-SX1262 B2B pinout.
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI);
 
   Serial.println("Initializing SX1262...");
@@ -302,21 +299,21 @@ void setup() {
 
   Serial.println("Radio initialization OK");
 
-  // Wio-SX1262 uses GPIO38 as its external RF switch control.
-  // RadioLib switches it automatically between RX and TX.
   radio.setRfSwitchPins(LORA_RF_SW, RADIOLIB_NC);
+
   Serial.println("RF switch configured (GPIO38).");
 
-  // Open ESP32 nonvolatile storage in read/write mode.
   if (!store.begin(STORAGE_NAMESPACE, false)) {
     haltDevice("ERROR: Could not open ESP32 persistent storage.");
   }
 
   loadUplinkInterval();
-  Serial.printf("Configured uplink interval: %lu minutes.\n",
-                (unsigned long)uplinkIntervalMinutes);
 
-  // Configure uplinks and join attempts before starting OTAA.
+  Serial.printf(
+    "Configured uplink interval: %lu minutes.\n",
+    (unsigned long)uplinkIntervalMinutes
+  );
+
   node.setADR(true);
   node.setDutyCycle(true, 1250);
   node.setDeviceStatus(0);
@@ -330,9 +327,12 @@ void loop() {
   uint32_t waitMs = node.timeUntilUplink();
 
   if (waitMs > 0) {
-    Serial.printf("Airtime wait: %lu seconds\n",
-                  (unsigned long)((waitMs + 999UL) / 1000UL));
-    lowPowerWait(waitMs);
+    Serial.printf(
+      "Airtime wait: %lu seconds\n",
+      (unsigned long)((waitMs + 999UL) / 1000UL)
+    );
+
+    waitWithoutSleep(waitMs);
   }
 
   float temperature = temperatureRead();
@@ -341,15 +341,18 @@ void loop() {
       temperature < -327.68f ||
       temperature > 327.67f) {
     Serial.println("Invalid temperature: skipping this reading.");
-    lowPowerWait(uplinkIntervalSeconds() * 1000UL);
+
+    waitWithoutSleep(uplinkIntervalSeconds() * 1000UL);
     return;
   }
 
   // Uplink payload, big-endian:
   // bytes 0..1: signed temperature in 0.01 C
-  // bytes 2..3: configured uplink interval in whole minutes
+  // bytes 2..3: configured interval in whole minutes
+
   int16_t temperature100 =
     (int16_t)lroundf(temperature * 100.0f);
+
   uint16_t encodedTemperature = (uint16_t)temperature100;
   uint16_t encodedInterval = (uint16_t)uplinkIntervalMinutes;
 
@@ -360,20 +363,32 @@ void loop() {
     (uint8_t)(encodedInterval & 0xFF)
   };
 
-  Serial.printf("\nSending chip temperature: %.2f C\n",
-                temperature);
-  Serial.printf("Configured interval: %lu minutes\n",
-                (unsigned long)uplinkIntervalMinutes);
-  Serial.printf("Payload: %02X %02X %02X %02X, FPort: 1\n",
-                payload[0], payload[1], payload[2], payload[3]);
+  Serial.printf(
+    "\nSending chip temperature: %.2f C\n",
+    temperature
+  );
+
+  Serial.printf(
+    "Configured interval: %lu minutes\n",
+    (unsigned long)uplinkIntervalMinutes
+  );
+
+  Serial.printf(
+    "Payload: %02X %02X %02X %02X, FPort: 1\n",
+    payload[0],
+    payload[1],
+    payload[2],
+    payload[3]
+  );
 
   uint8_t downlinkPayload[16] = { 0 };
   size_t downlinkLength = sizeof(downlinkPayload);
+
   LoRaWANEvent_t downlinkEvent = {};
+
   uint32_t frameCountBefore = node.getFCntUp();
 
-  // Unconfirmed uplink, followed by both receive windows.
-  // The overload with a downlink buffer exposes application commands.
+  // Unconfirmed uplink, followed by RX1 and RX2.
   int16_t state = node.sendReceive(
     payload,
     sizeof(payload),
@@ -385,24 +400,66 @@ void loop() {
     &downlinkEvent
   );
 
-  // Persist nonce state after the exchange as well.
-  // Session frame counters are NOT restored after reboot:
-  // the device performs a fresh OTAA join instead.
+  // Diagnostic output.
+  Serial.printf("sendReceive() state: %d\n", state);
+
+  Serial.printf(
+    "downlinkLength: %u\n",
+    (unsigned int)downlinkLength
+  );
+
+  Serial.printf(
+    "downlinkEvent FPort: %u\n",
+    downlinkEvent.fPort
+  );
+
+  Serial.printf(
+    "downlinkEvent FCnt: %lu\n",
+    (unsigned long)downlinkEvent.fCnt
+  );
+
+  if (downlinkLength > 0) {
+    Serial.print("Downlink application payload: ");
+
+    for (size_t i = 0; i < downlinkLength; i++) {
+      Serial.printf("%02X ", downlinkPayload[i]);
+    }
+
+    Serial.println();
+  }
+
   saveNonces();
 
-  if (state > 0) {
-    Serial.printf("Downlink received in RX%u, FPort %u, %u bytes.\n",
-                  (unsigned int)state,
-                  downlinkEvent.fPort,
-                  (unsigned int)downlinkLength);
+  // IMPORTANT:
+  // Check the application payload length first.
+  // A valid downlink can be present even if state == 0.
+  if (downlinkLength > 0) {
+    Serial.println("Application downlink received!");
 
-    if (downlinkLength > 0) {
-      processDownlink(downlinkPayload, downlinkLength, downlinkEvent);
+    if (downlinkEvent.fPort == commandFPort) {
+      processDownlink(
+        downlinkPayload,
+        downlinkLength,
+        downlinkEvent
+      );
     } else {
-      Serial.println("Downlink contained no application payload.");
+      Serial.printf(
+        "Unexpected downlink FPort: %u\n",
+        downlinkEvent.fPort
+      );
     }
+
+  } else if (state > 0) {
+    Serial.printf(
+      "Downlink received in RX%u, but no application payload was returned.\n",
+      (unsigned int)state
+    );
+
   } else if (state == 0) {
-    Serial.println("Uplink transmitted; no downlink received (normal).");
+    Serial.println(
+      "Uplink transmitted; no application downlink received (normal)."
+    );
+
   } else {
     printResult("Uplink exchange returned an error", state);
   }
@@ -413,7 +470,10 @@ void loop() {
     );
   }
 
-  Serial.printf("Next attempt in %lu minutes, subject to airtime limits.\n",
-                (unsigned long)uplinkIntervalMinutes);
-  lowPowerWait(uplinkIntervalSeconds() * 1000UL);
+  Serial.printf(
+    "Next attempt in %lu minutes, subject to airtime limits.\n",
+    (unsigned long)uplinkIntervalMinutes
+  );
+
+  waitWithoutSleep(uplinkIntervalSeconds() * 1000UL);
 }
