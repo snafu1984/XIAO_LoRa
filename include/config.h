@@ -1,3 +1,4 @@
+
 #ifndef XIAO_TEMPERATURE_CONFIG_H
 #define XIAO_TEMPERATURE_CONFIG_H
 
@@ -6,14 +7,42 @@
 #include <string.h>
 #include "secrets.h"
 
+// --------------------------------------------------
+// Debug configuration
+// --------------------------------------------------
+
+// 1 = Debug mode enabled (Light Sleep disabled)
+// 0 = Normal mode enabled (Light Sleep enabled)
+#define DEBUG_MODE 0
+
+#if DEBUG_MODE
+  #define DEBUG_PRINT(...)   Serial.print(__VA_ARGS__)
+  #define DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
+  #define DEBUG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(...)
+  #define DEBUG_PRINTLN(...)
+  #define DEBUG_PRINTF(...)
+#endif
+
+// --------------------------------------------------
+// Uplink interval configuration
+// --------------------------------------------------
+
 // Default interval and accepted range for remotely configured uplinks.
 constexpr uint32_t defaultUplinkIntervalMinutes = 10UL;
 constexpr uint32_t minUplinkIntervalMinutes = 1UL;
 constexpr uint32_t maxUplinkIntervalMinutes = 1440UL;
+
 constexpr uint8_t commandFPort = 2;
 constexpr uint8_t commandSetInterval = 0x01;
 
+// --------------------------------------------------
+// LoRaWAN keys
+// --------------------------------------------------
+
 constexpr size_t lorawanKeySize = 16;
+
 uint8_t appKey[lorawanKeySize];
 uint8_t nwkKey[lorawanKeySize];
 
@@ -21,12 +50,15 @@ int8_t hexDigitValue(char digit) {
   if (digit >= '0' && digit <= '9') {
     return digit - '0';
   }
+
   if (digit >= 'A' && digit <= 'F') {
     return digit - 'A' + 10;
   }
+
   if (digit >= 'a' && digit <= 'f') {
     return digit - 'a' + 10;
   }
+
   return -1;
 }
 
@@ -38,18 +70,28 @@ bool decodeLoRaWANKey(const char* hex, uint8_t* key) {
   for (size_t i = 0; i < lorawanKeySize; i++) {
     int8_t high = hexDigitValue(hex[i * 2]);
     int8_t low = hexDigitValue(hex[i * 2 + 1]);
+
     if (high < 0 || low < 0) {
       return false;
     }
+
     key[i] = (uint8_t)((high << 4) | low);
   }
 
   return true;
 }
 
-// Switzerland: EU868.
+// --------------------------------------------------
+// LoRaWAN region
+// --------------------------------------------------
+
+// EU868 region.
 const LoRaWANBand_t Region = EU868;
 const uint8_t subBand = 0;
+
+// --------------------------------------------------
+// Hardware configuration
+// --------------------------------------------------
 
 // Tested XIAO ESP32S3 + Wio-SX1262 B2B kit pins.
 const int LORA_SCK    = 7;
@@ -71,10 +113,18 @@ SX1262 radio = new Module(
 
 LoRaWANNode node(&radio, &Region, subBand);
 
+// --------------------------------------------------
+// Persistent storage
+// --------------------------------------------------
+
 // Persistent storage namespace.
 // Do not change this or erase flash to troubleshoot joining:
 // doing so would lose the stored nonce history.
 const char* STORAGE_NAMESPACE = "xiao-lora2";
+
+// --------------------------------------------------
+// RadioLib result-code decoder
+// --------------------------------------------------
 
 // Compact result-code decoder for RadioLib 6.6.0.
 String stateDecode(int16_t state) {
