@@ -354,4 +354,4 @@ reading against a multimeter.
 
 ## License
 
-See the `LICENSE` file for license information.
+This project is licensed under the [MIT License](LICENSE). file for license information.
