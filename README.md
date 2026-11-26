@@ -69,18 +69,18 @@ The values in `secrets.h` are placeholders and must be replaced. Do not upload f
 
 ## Firmware behavior
 
-- Initializes SPI and the SX1262.
+- Initializes I2C on D4/D5, the INA226, SPI and the SX1262.
 - Configures the external RF switch on GPIO38 through RadioLib.
 - Restores the LoRaWAN nonce buffer from ESP32 NVS, associated with the configured DevEUI.
 - Performs OTAA with bounded attempts and long retry backoff.
-- Sends the ESP32 internal chip-temperature reading as a signed 16-bit big-endian value in hundredths of a degree Celsius, on FPort 1.
+- Reads battery voltage from the INA226 over I2C and sends it as an unsigned 16-bit big-endian value in 0.01 V steps, on FPort 1.
 - Requests an uplink interval of 10 minutes, subject to regional duty-cycle / airtime constraints.
 
-The internal ESP32 temperature reading is a chip temperature, not an ambient-temperature measurement.
+The INA226 bus-voltage register is read directly; no shunt calibration is needed for this voltage-only measurement. The firmware reports voltage with 0.01 V resolution.
 
 ## TTN payload formatter
 
-The JavaScript decoder is in `docs/ttn_payload_formatter.js`. Add it to the application's uplink payload formatter as a custom JavaScript formatter if you want the `temperature_c` field decoded in TTN.
+The JavaScript decoder is in `docs/ttn_payload_formatter.js`. Add it to the application's uplink payload formatter as a custom JavaScript formatter to decode `battery_voltage_v` and `uplink_interval_minutes` in TTN.
 
 ## Persistent state and device identity
 

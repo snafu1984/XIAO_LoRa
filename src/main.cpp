@@ -1,16 +1,49 @@
 
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
 #include <Preferences.h>
 #include <math.h>
 #include <esp_sleep.h>
 #include <esp_timer.h>
 #include "config.h"
+#include "sensors/SensorManager.h"
 
 void haltDevice(const char* message);
 
 Preferences store;
+SensorManager sensorManager;
 uint32_t uplinkIntervalMinutes = defaultUplinkIntervalMinutes;
+
+// --------------------------------------------------
+// I2C configuration
+// --------------------------------------------------
+
+constexpr uint32_t I2C_FREQUENCY = 100000;
+
+void scanI2CBus() {
+  DEBUG_PRINTLN("\nScanning I2C bus...");
+
+  uint8_t devicesFound = 0;
+
+  for (uint8_t address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+
+    if (Wire.endTransmission() == 0) {
+      DEBUG_PRINTF(
+        "I2C device found at address: 0x%02X\n",
+        address
+      );
+
+      devicesFound++;
+    }
+  }
+
+  DEBUG_PRINTF(
+    "I2C scan complete. Devices found: %u\n",
+    devicesFound
+  );
+}
 
 // --------------------------------------------------
 // Uplink interval
@@ -142,7 +175,6 @@ void waitForNextUplink(uint32_t waitMs) {
 
 #if DEBUG_MODE
 
-  // Debug mode: keep USB serial active.
   DEBUG_PRINTF(
     "\nWaiting without Light Sleep for %lu ms...\n",
     (unsigned long)waitMs
@@ -156,7 +188,6 @@ void waitForNextUplink(uint32_t waitMs) {
 
 #else
 
-  // Configure timer wake-up.
   esp_err_t wakeupResult = esp_sleep_enable_timer_wakeup(
     (uint64_t)waitMs * 1000ULL
   );
@@ -171,7 +202,6 @@ void waitForNextUplink(uint32_t waitMs) {
     return;
   }
 
-  // Record start time immediately before sleeping.
   int64_t sleepStartUs = esp_timer_get_time();
 
   Serial.printf(
@@ -181,20 +211,16 @@ void waitForNextUplink(uint32_t waitMs) {
 
   Serial.flush();
 
-  // Enter Light Sleep.
   esp_err_t sleepResult = esp_light_sleep_start();
 
-  // Measure elapsed time after waking up.
   int64_t sleepEndUs = esp_timer_get_time();
 
   uint64_t actualSleepUs =
     (uint64_t)(sleepEndUs - sleepStartUs);
 
-  // Read wake-up cause.
   esp_sleep_wakeup_cause_t wakeupCause =
     esp_sleep_get_wakeup_cause();
 
-  // Disable timer wake-up source.
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 
   if (sleepResult != ESP_OK) {
@@ -258,7 +284,6 @@ void restoreNonces() {
     return;
   }
 
-  // Nonce counters belong to one device identity.
   if (store.getULong64("deveui", 0) != devEUI) {
     DEBUG_PRINTLN(
       "Saved nonces belong to another device identity: discarding."
@@ -385,20 +410,30 @@ void setup() {
 
 #if DEBUG_MODE
 
-  // Allow USB serial to connect in debug mode.
   unsigned long started = millis();
 
   while (!Serial && millis() - started < 10000UL) {
     delay(10);
   }
 
-  DEBUG_PRINTLN("\nXIAO chip-temperature LoRaWAN sensor");
+  DEBUG_PRINTLN("\nXIAO battery-voltage LoRaWAN sensor");
   DEBUG_PRINTLN("Debug mode enabled: Light Sleep disabled.");
 
 #else
 
   DEBUG_PRINTLN("Normal mode enabled: Light Sleep active.");
 
+#endif
+
+  // Initialize I2C on XIAO ESP32-S3 D4 (SDA) and D5 (SCL).
+  if (!Wire.begin(D4, D5, I2C_FREQUENCY)) {
+    haltDevice("ERROR: Could not initialize I2C.");
+  }
+
+  DEBUG_PRINTLN("I2C initialized.");
+
+#if DEBUG_MODE
+  scanI2CBus();
 #endif
 
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI);
@@ -435,7 +470,12 @@ void setup() {
 
   joinNetwork();
 
-  DEBUG_PRINTLN("Ready to send chip temperature.");
+  if (!sensorManager.begin(Wire)) {
+    haltDevice("ERROR: INA226 initialization failed. Check wiring and I2C address.");
+  }
+
+  DEBUG_PRINTLN("INA226 initialized.");
+  DEBUG_PRINTLN("Ready to send battery voltage.");
 }
 
 // --------------------------------------------------
@@ -454,37 +494,35 @@ void loop() {
     waitForNextUplink(waitMs);
   }
 
-  float temperature = temperatureRead();
+  float batteryVoltage = 0.0f;
 
-  if (!isfinite(temperature) ||
-      temperature < -327.68f ||
-      temperature > 327.67f) {
-    DEBUG_PRINTLN("Invalid temperature: skipping this reading.");
-
+  if (!sensorManager.readBatteryVoltage(batteryVoltage) ||
+      !isfinite(batteryVoltage) ||
+      batteryVoltage < 0.0f ||
+      batteryVoltage > 65.535f) {
+    DEBUG_PRINTLN("Invalid battery voltage: skipping this reading.");
     waitForNextUplink(uplinkIntervalSeconds() * 1000UL);
     return;
   }
 
   // Uplink payload, big-endian:
-  // bytes 0..1: signed temperature in 0.01 C
+  // bytes 0..1: battery voltage in 0.01 V
   // bytes 2..3: configured interval in whole minutes
 
-  int16_t temperature100 =
-    (int16_t)lroundf(temperature * 100.0f);
-
-  uint16_t encodedTemperature = (uint16_t)temperature100;
+  uint16_t encodedVoltage =
+    (uint16_t)lroundf(batteryVoltage * 100.0f);
   uint16_t encodedInterval = (uint16_t)uplinkIntervalMinutes;
 
   uint8_t payload[4] = {
-    (uint8_t)(encodedTemperature >> 8),
-    (uint8_t)(encodedTemperature & 0xFF),
+    (uint8_t)(encodedVoltage >> 8),
+    (uint8_t)(encodedVoltage & 0xFF),
     (uint8_t)(encodedInterval >> 8),
     (uint8_t)(encodedInterval & 0xFF)
   };
 
   DEBUG_PRINTF(
-    "\nSending chip temperature: %.2f C\n",
-    temperature
+    "\nSending battery voltage: %.2f V\n",
+    batteryVoltage
   );
 
   DEBUG_PRINTF(
@@ -507,7 +545,6 @@ void loop() {
 
   uint32_t frameCountBefore = node.getFCntUp();
 
-  // Unconfirmed uplink, followed by RX1 and RX2.
   int16_t state = node.sendReceive(
     payload,
     sizeof(payload),
@@ -519,7 +556,6 @@ void loop() {
     &downlinkEvent
   );
 
-  // Diagnostic output.
   DEBUG_PRINTF("sendReceive() state: %d\n", state);
 
   DEBUG_PRINTF(
@@ -549,8 +585,6 @@ void loop() {
 
   saveNonces();
 
-  // Check application payload length first.
-  // A valid downlink can be present even if state == 0.
   if (downlinkLength > 0) {
     DEBUG_PRINTLN("Application downlink received!");
 
